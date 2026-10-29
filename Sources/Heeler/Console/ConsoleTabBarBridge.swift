@@ -103,10 +103,16 @@ struct ConsoleTabBarBridge: UIViewRepresentable {
         /// Without animation either way: hidden at once for the reasons
         /// above, and shown as SwiftUI shows it.
         private func applyVisibility() {
+            PasteDiagnostics.logTabBar(
+                "applyVisibility", controller: window == nil ? nil : tabBarController,
+                requested: request.hidesBar, inWindow: window != nil)
             guard window != nil, let controller = tabBarController,
                 controller.isTabBarHidden != request.hidesBar
             else { return }
             controller.setTabBarHidden(request.hidesBar, animated: false)
+            PasteDiagnostics.logTabBar(
+                "applyVisibility.after", controller: controller,
+                requested: request.hidesBar, inWindow: true)
         }
 
         /// The bar's views can be rebuilt by a rotation or size change.
@@ -131,6 +137,9 @@ struct ConsoleTabBarBridge: UIViewRepresentable {
             let isHidden = controller.isTabBarHidden
             controller.setTabBarHidden(!isHidden, animated: false)
             controller.setTabBarHidden(isHidden, animated: false)
+            PasteDiagnostics.logTabBar(
+                "settleSafeArea", controller: controller,
+                requested: request.hidesBar, inWindow: true)
         }
 
         /// Every view of the tab bar controller except the one holding the

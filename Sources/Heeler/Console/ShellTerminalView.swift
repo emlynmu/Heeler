@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import os
 
 /// Local Agent Detail destination for one ordinary herdr shell terminal.
 /// Ghostty owns direct keyboard input, output, scrollback and resize. There is
@@ -252,6 +253,9 @@ struct ShellTerminalView: View {
             // Keyboard avoidance is owned by `TerminalKeyboardInset`; UIKit's
             // keyboard safe area would resize Ghostty a second time.
             .ignoresSafeArea(.keyboard, edges: .bottom)
+            .onChange(of: keyboardDiagnostics, initial: true) { _, summary in
+                PasteDiagnostics.log.notice("shell keyboard \(summary, privacy: .public)")
+            }
             // No title bar, as on Agent detail: the navigation bar stays
             // only as the owner of the status bar appearance, and this inset
             // keeps terminal output below the system clock.
@@ -432,6 +436,15 @@ struct ShellTerminalView: View {
     /// a measured inset covers UIKit's show before first responder lands.
     private var isKeyboardShown: Bool {
         isKeyboardUpForHandoff || keyboardInset.height > 0
+    }
+
+    /// Temporary diagnostics for the paste-bug investigation.
+    private var keyboardDiagnostics: String {
+        "mode=\(keyboardMode) presentation=\(keyboardPresentation) "
+            + "inset=\(keyboardInset.height) lastPresented=\(keyboardInset.lastPresentedHeight) "
+            + "softwareDismissed=\(keyboardInset.isSoftwareKeyboardDismissed) "
+            + "contentInset=\(keyboardLayout.contentInset) "
+            + "toolsHeight=\(keyboardLayout.availableToolsHeight) shown=\(isKeyboardShown)"
     }
 
     /// Hides whichever keyboard is up, Keys included, or raises the system
@@ -676,6 +689,7 @@ struct ShellTerminalInputRow: View {
             .frame(
                 width: InputChromeLayout.shellAccessoryButtonWidth,
                 height: InputChromeLayout.shortcutRowHeight)
+            .background { PasteDiagnosticProbe() }
             .frame(width: Self.sideWidth, alignment: .leading)
 
             Spacer(minLength: 4)
@@ -812,5 +826,147 @@ private struct ShellTerminalEdgeBackGesture: View {
                     }
             )
             .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Temporary paste-bug diagnostics
+
+/// Temporary: logs why the shell row's paste glyph can go missing and why a
+/// gap opens above the keyboard. Read in Console.app with subsystem
+/// `dev.bybee.heeler`, category `PasteDiag`. Remove before merging.
+enum PasteDiagnostics {
+    static let log = Logger(subsystem: "dev.bybee.heeler", category: "PasteDiag")
+
+    @MainActor
+    static func logTabBar(
+        _ event: String, controller: UITabBarController?, requested: Bool, inWindow: Bool
+    ) {
+        guard let controller else {
+            log.notice(
+                "tabBar \(event, privacy: .public) requested=\(requested) inWindow=\(inWindow) controller=nil")
+            return
+        }
+        let bar = controller.tabBar
+        let frame = bar.window.map { bar.convert(bar.bounds, to: $0) } ?? .null
+        let contentSafeBottom = controller.selectedViewController?.view.safeAreaInsets.bottom ?? -1
+        let summary =
+            "requested=\(requested) isTabBarHidden=\(controller.isTabBarHidden) "
+            + "bar.isHidden=\(bar.isHidden) alpha=\(bar.alpha) frame=\(describe(frame)) "
+            + "sizeClass=\(controller.traitCollection.horizontalSizeClass.rawValue) "
+            + "contentSafeBottom=\(contentSafeBottom)"
+        // Every SwiftUI update reapplies the request; log only what changed.
+        guard summary != lastTabBarSummary else { return }
+        lastTabBarSummary = summary
+        log.notice("tabBar \(event, privacy: .public) \(summary, privacy: .public)")
+    }
+
+    @MainActor private static var lastTabBarSummary = ""
+
+    static func describe(_ rect: CGRect) -> String {
+        guard !rect.isNull else { return "null" }
+        return String(
+            format: "(%.0f,%.0f %.0fx%.0f)", rect.minX, rect.minY, rect.width, rect.height)
+    }
+}
+
+/// Sits behind the shell row's paste control and reports its frame, the
+/// paste controls in the window, and every visible view or window painted
+/// above it that intersects it.
+struct PasteDiagnosticProbe: UIViewRepresentable {
+    func makeUIView(context: Context) -> ProbeView { ProbeView() }
+
+    func updateUIView(_ view: ProbeView, context: Context) { view.report("update") }
+
+    final class ProbeView: UIView {
+        private var timer: Timer?
+        private var lastReport = ""
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            isUserInteractionEnabled = false
+            backgroundColor = .clear
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) is unavailable")
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            timer?.invalidate()
+            timer = nil
+            guard window != nil else {
+                PasteDiagnostics.log.notice("probe left window")
+                lastReport = ""
+                return
+            }
+            report("window")
+            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.report("tick") }
+            }
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            report("layout")
+        }
+
+        func report(_ reason: String) {
+            guard let window else { return }
+            let rect = convert(bounds, to: window)
+            var lines = [
+                "rect=\(PasteDiagnostics.describe(rect)) window=\(PasteDiagnostics.describe(window.bounds)) "
+                    + "windowSafeBottom=\(window.safeAreaInsets.bottom) probeSafeBottom=\(safeAreaInsets.bottom) "
+                    + "key=\(window.isKeyWindow) hasStrings=\(UIPasteboard.general.hasStrings)"
+            ]
+            var pasteControls: [String] = []
+            var above: [String] = []
+            var passedSelf = false
+            func visit(_ view: UIView, opacity: CGFloat) {
+                let opacity = view.isHidden ? 0 : opacity * view.alpha
+                if view === self {
+                    passedSelf = true
+                    return
+                }
+                let frame = view.convert(view.bounds, to: window)
+                let name = String(describing: type(of: view))
+                if name.localizedCaseInsensitiveContains("paste") {
+                    let enabled = (view as? UIControl).map { "\($0.isEnabled)" } ?? "-"
+                    pasteControls.append(
+                        "\(name) frame=\(PasteDiagnostics.describe(frame)) opacity=\(opacity) "
+                            + "hidden=\(view.isHidden) enabled=\(enabled) "
+                            + "intersectsProbe=\(frame.intersects(rect))")
+                }
+                if passedSelf, opacity > 0.01, view !== window, frame.intersects(rect),
+                    above.count < 30
+                {
+                    above.append(
+                        "\(name) frame=\(PasteDiagnostics.describe(frame)) opacity=\(opacity)")
+                }
+                for subview in view.subviews { visit(subview, opacity: opacity) }
+            }
+            visit(window, opacity: 1)
+            lines.append(contentsOf: pasteControls.map { "pasteControl \($0)" })
+            lines.append(contentsOf: above.map { "above \($0)" })
+            if let scene = window.windowScene {
+                for other in scene.windows where other !== window && !other.isHidden {
+                    let frame = other.convert(other.bounds, to: window)
+                    guard frame.intersects(rect) else { continue }
+                    lines.append(
+                        "otherWindow \(String(describing: type(of: other))) "
+                            + "level=\(other.windowLevel.rawValue) alpha=\(other.alpha) "
+                            + "frame=\(PasteDiagnostics.describe(frame))")
+                }
+            }
+            let summary = lines.joined(separator: "\n")
+            guard summary != lastReport else { return }
+            lastReport = summary
+            let id = UUID().uuidString.prefix(8)
+            for line in lines {
+                PasteDiagnostics.log.notice(
+                    "probe[\(id, privacy: .public)] \(reason, privacy: .public) \(line, privacy: .public)")
+            }
+        }
     }
 }

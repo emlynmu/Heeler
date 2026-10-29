@@ -848,6 +848,16 @@ struct ConsoleView: View {
                 chromeScheme: tabBarChromeScheme, hidesBar: hidesTabBar, request: tabBarRequest)
         }
         .toolbarVisibility(hidesTabBar ? .hidden : .automatic, for: .tabBar)
+        .onChange(of: tabBarDiagnostics(for: tab), initial: true) { _, summary in
+            PasteDiagnostics.log.notice("console \(summary, privacy: .public)")
+        }
+    }
+
+    /// Temporary diagnostics for the paste-bug investigation.
+    private func tabBarDiagnostics(for tab: ConsoleTab) -> String {
+        "splitTab=\(tab) currentTab=\(currentTab) sizeClass=\(String(describing: horizontalSizeClass)) "
+            + "sidebarNav=\(usesSidebarNavigation) "
+            + "selection=\(String(describing: selectedItem.wrappedValue)) hidesTabBar=\(hidesTabBar)"
     }
 
     /// Beside an iPad's sidebar both lists stay built, the one not shown
