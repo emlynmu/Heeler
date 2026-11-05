@@ -443,6 +443,12 @@ struct AgentDirectInputTests {
     @Test func composerAndDirectInputTransferVisibleKeyboardWithoutReloading() async throws {
         let center = NotificationCenter.default
         let inset = TerminalKeyboardInset(notificationCenter: center)
+        // Both handoffs below end on the destination's settle; the wall-clock
+        // fallbacks must stay out of them. On a loaded runner the destination
+        // can take over a second to receive the request, and the inset's
+        // watchdog then ended the freeze before the settle arrived (#225, #629).
+        inset.responderHandoffFallbackDelay = .seconds(60)
+        inset.destinationResponderHandoffFallbackDelay = .seconds(60)
         let keyboardTransitions = KeyboardTransitionProbe(
             notificationCenter: center,
             insetHeight: { inset.height })
@@ -475,6 +481,7 @@ struct AgentDirectInputTests {
         })
 
         let terminal = try #require(Self.terminals(in: controller.view).first)
+        terminal.keyboardTransitionFallbackDelay = 60
         #expect(!terminal.isLocalInputEnabled)
         let composerInput = try #require(
             Self.firstView(in: controller.view) {
